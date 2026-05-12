@@ -1,0 +1,3 @@
+# Replace deploy-bot with your real DSM username.
+# This grants root only for the fixed deploy helper, not for a general shell.
+deploy-bot ALL=(root) NOPASSWD: /usr/local/bin/karaoke-night-deploy
