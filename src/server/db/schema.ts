@@ -62,6 +62,8 @@ export const songs = sqliteTable(
     durationLabel: text("duration_label"),
     languageHint: text("language_hint"),
     embeddable: integer("embeddable", { mode: "boolean" }).notNull().default(true),
+    embedBlockedAt: text("embed_blocked_at"),
+    playSuccessCount: integer("play_success_count").notNull().default(0),
     deletedAt: text("deleted_at"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),

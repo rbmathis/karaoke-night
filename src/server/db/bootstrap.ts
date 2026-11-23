@@ -57,6 +57,8 @@ export function ensureSchema(sqlite: Database.Database) {
       duration_label TEXT,
       language_hint TEXT,
       embeddable INTEGER NOT NULL DEFAULT 1,
+      embed_blocked_at TEXT,
+      play_success_count INTEGER NOT NULL DEFAULT 0,
       deleted_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -142,5 +144,13 @@ export function ensureSchema(sqlite: Database.Database) {
 
   if (!hasColumn(sqlite, "songs", "deleted_at")) {
     sqlite.exec("ALTER TABLE songs ADD COLUMN deleted_at TEXT");
+  }
+
+  if (!hasColumn(sqlite, "songs", "embed_blocked_at")) {
+    sqlite.exec("ALTER TABLE songs ADD COLUMN embed_blocked_at TEXT");
+  }
+
+  if (!hasColumn(sqlite, "songs", "play_success_count")) {
+    sqlite.exec("ALTER TABLE songs ADD COLUMN play_success_count INTEGER NOT NULL DEFAULT 0");
   }
 }

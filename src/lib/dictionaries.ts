@@ -101,6 +101,9 @@ export const messages = {
         "YouTube sometimes blocks playback on a specific browser, device, or NAS hostname even when search says the video is embeddable.",
       playbackMissingHint:
         "This video is no longer available for playback from YouTube.",
+      tryAnotherVersion: "Try another version",
+      playbackStalledBanner:
+        "Didn't auto-start? Tap play on the video, or try another version.",
     },
     search: {
       title: "Search karaoke songs",
@@ -116,6 +119,9 @@ export const messages = {
       addFavorite: "Save favorite",
       removeFavorite: "Remove favorite",
       embeddableOnly: "Embeddable karaoke videos only",
+      notEmbeddableBadge: "May not play in-app",
+      notEmbeddableHint:
+        "This video's owner has disabled embedding, so it may refuse to play here. Prefer another result if one is available, or open it on YouTube instead.",
       searchTheme: "Use room theme",
     },
     host: {
@@ -291,6 +297,9 @@ export const messages = {
         "検索では埋め込み可でも、ブラウザ・端末・NAS のホスト名によって YouTube が再生をブロックすることがあります。",
       playbackMissingHint:
         "この動画は YouTube 側で再生できなくなっています。",
+      tryAnotherVersion: "別のバージョンを試す",
+      playbackStalledBanner:
+        "自動再生されない場合は動画の再生ボタンを押すか、別のバージョンを試してください。",
     },
     search: {
       title: "カラオケ曲を検索",
@@ -306,6 +315,9 @@ export const messages = {
       addFavorite: "お気に入り登録",
       removeFavorite: "お気に入り解除",
       embeddableOnly: "埋め込み再生できる動画のみ",
+      notEmbeddableBadge: "アプリ内で再生できない可能性",
+      notEmbeddableHint:
+        "この動画の投稿者が埋め込みを無効にしているため、ここでは再生できない場合があります。可能であれば他の候補を選ぶか、YouTube で直接開いてください。",
       searchTheme: "ルームテーマを使う",
     },
     host: {

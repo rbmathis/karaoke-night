@@ -13,12 +13,18 @@ export async function GET(request: Request) {
     const payload = youtubeSearchSchema.parse({
       q: url.searchParams.get("q"),
       locale: url.searchParams.get("locale"),
+      pageToken: url.searchParams.get("pageToken") || undefined,
     });
 
-    const results = await searchYouTubeKaraoke(payload.q, payload.locale);
+    const { results, nextPageToken } = await searchYouTubeKaraoke(
+      payload.q,
+      payload.locale,
+      payload.pageToken,
+    );
 
     return NextResponse.json({
       results,
+      nextPageToken,
     });
   } catch (error) {
     return errorResponse(error);

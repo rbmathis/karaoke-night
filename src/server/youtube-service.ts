@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, eq, gt, inArray, isNotNull } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, or, sql } from "drizzle-orm";
 
 import { KARAOKE_CHANNEL_HINTS, SEARCH_CACHE_TTL_MS } from "@/lib/constants";
 import type { SearchResult } from "@/lib/room-types";
@@ -57,6 +57,12 @@ function scoreSearchResult(
 
   let score = 0;
 
+  // Heavily penalize videos that can't be embedded so they only surface when
+  // there is no embeddable alternative, rather than being dropped entirely.
+  if (!item.embeddable) {
+    score -= 1000;
+  }
+
   if (haystack.includes(normalizedQuery)) {
     score += 18;
   }
@@ -84,7 +90,11 @@ function scoreSearchResult(
   return score;
 }
 
-async function fetchFromYouTube(query: string, locale: "en" | "ja") {
+async function fetchFromYouTube(
+  query: string,
+  locale: "en" | "ja",
+  pageToken?: string,
+) {
   const apiKey = process.env.YOUTUBE_API_KEY;
 
   if (!apiKey) {
@@ -96,10 +106,13 @@ async function fetchFromYouTube(query: string, locale: "en" | "ja") {
   searchUrl.searchParams.set("type", "video");
   searchUrl.searchParams.set("videoEmbeddable", "true");
   searchUrl.searchParams.set("videoSyndicated", "true");
-  searchUrl.searchParams.set("maxResults", "12");
+  searchUrl.searchParams.set("maxResults", "16");
   searchUrl.searchParams.set("q", buildSearchQuery(query, locale));
   searchUrl.searchParams.set("key", apiKey);
   searchUrl.searchParams.set("relevanceLanguage", locale);
+  if (pageToken) {
+    searchUrl.searchParams.set("pageToken", pageToken);
+  }
 
   const searchResponse = await fetch(searchUrl.toString(), {
     cache: "no-store",
@@ -111,14 +124,20 @@ async function fetchFromYouTube(query: string, locale: "en" | "ja") {
 
   const searchJson = (await searchResponse.json()) as {
     items?: YouTubeSearchItem[];
+    nextPageToken?: string;
   };
+
+  const nextPageToken = searchJson.nextPageToken ?? null;
 
   const videoIds = (searchJson.items ?? [])
     .map((item) => item.id?.videoId)
     .filter((videoId): videoId is string => Boolean(videoId));
 
   if (videoIds.length === 0) {
-    return [] as SearchResult[];
+    return {
+      results: [] as SearchResult[],
+      nextPageToken: null as string | null,
+    };
   }
 
   const videosUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
@@ -166,10 +185,6 @@ async function fetchFromYouTube(query: string, locale: "en" | "ja") {
 
       const status = byVideoId.get(videoId);
 
-      if (!status?.embeddable) {
-        return null;
-      }
-
       const title = item.snippet?.title?.trim();
       const channelTitle = item.snippet?.channelTitle?.trim();
       const thumbnailUrl =
@@ -187,9 +202,10 @@ async function fetchFromYouTube(query: string, locale: "en" | "ja") {
         title,
         channelTitle,
         thumbnailUrl,
-        durationLabel: status.durationLabel,
+        durationLabel: status?.durationLabel ?? null,
         languageHint: locale,
         description: item.snippet?.description?.trim() ?? "",
+        embeddable: Boolean(status?.embeddable),
         score: 0,
       } satisfies SearchResult;
 
@@ -208,22 +224,55 @@ async function fetchFromYouTube(query: string, locale: "en" | "ja") {
         durationLabel: string | null;
         languageHint: "en" | "ja";
         description: string;
+        embeddable: boolean;
         score: number;
       } => Boolean(item),
     )
     .sort((left, right) => right.score - left.score)
-    .slice(0, 10);
+    .slice(0, 12);
 
-  return results;
+  return {
+    results,
+    nextPageToken,
+  };
 }
 
-function filterDeletedSearchResults(results: SearchResult[]) {
+export function markSongEmbedBlocked(youtubeVideoId: string) {
+  const { db } = getDatabase();
+  const timestamp = new Date().toISOString();
+
+  db.update(songs)
+    .set({
+      embeddable: false,
+      embedBlockedAt: timestamp,
+      updatedAt: timestamp,
+    })
+    .where(eq(songs.youtubeVideoId, youtubeVideoId))
+    .run();
+}
+
+export function recordSongPlaybackSuccess(youtubeVideoId: string) {
+  const { db } = getDatabase();
+  const timestamp = new Date().toISOString();
+
+  db.update(songs)
+    .set({
+      embeddable: true,
+      embedBlockedAt: null,
+      playSuccessCount: sql`${songs.playSuccessCount} + 1`,
+      updatedAt: timestamp,
+    })
+    .where(eq(songs.youtubeVideoId, youtubeVideoId))
+    .run();
+}
+
+function applyCatalogPlaybackFilters(results: SearchResult[]) {
   if (results.length === 0) {
     return results;
   }
 
   const { db } = getDatabase();
-  const deletedSongs = db
+  const blockedSongs = db
     .select({
       youtubeVideoId: songs.youtubeVideoId,
     })
@@ -234,23 +283,66 @@ function filterDeletedSearchResults(results: SearchResult[]) {
           songs.youtubeVideoId,
           results.map((result) => result.youtubeVideoId),
         ),
-        isNotNull(songs.deletedAt),
+        or(isNotNull(songs.deletedAt), isNotNull(songs.embedBlockedAt)),
       ),
     )
     .all();
 
-  if (deletedSongs.length === 0) {
-    return results;
+  const blockedVideoIds = new Set(blockedSongs.map((song) => song.youtubeVideoId));
+  const filtered = results.filter((result) => !blockedVideoIds.has(result.youtubeVideoId));
+
+  if (filtered.length === 0) {
+    return filtered;
   }
 
-  const deletedVideoIds = new Set(deletedSongs.map((song) => song.youtubeVideoId));
-  return results.filter((result) => !deletedVideoIds.has(result.youtubeVideoId));
+  const reliableSongs = db
+    .select({
+      youtubeVideoId: songs.youtubeVideoId,
+      channelTitle: songs.channelTitle,
+    })
+    .from(songs)
+    .where(and(gt(songs.playSuccessCount, 0), isNotNull(songs.channelTitle)))
+    .all();
+
+  if (reliableSongs.length === 0) {
+    return filtered;
+  }
+
+  const reliableVideoIds = new Set(reliableSongs.map((song) => song.youtubeVideoId));
+  const reliableChannels = new Set(
+    reliableSongs.map((song) => normalizeSearchQuery(song.channelTitle)),
+  );
+
+  return filtered
+    .map((result) => {
+      let bonus = 0;
+
+      if (reliableVideoIds.has(result.youtubeVideoId)) {
+        bonus += 25;
+      }
+
+      if (reliableChannels.has(normalizeSearchQuery(result.channelTitle))) {
+        bonus += 12;
+      }
+
+      return bonus > 0 ? { ...result, score: result.score + bonus } : result;
+    })
+    .sort((left, right) => right.score - left.score);
 }
 
 export async function searchYouTubeKaraoke(
   query: string,
   locale: "en" | "ja",
-): Promise<SearchResult[]> {
+  pageToken?: string,
+): Promise<{ results: SearchResult[]; nextPageToken: string | null }> {
+  if (pageToken) {
+    const page = await fetchFromYouTube(query, locale, pageToken);
+    return {
+      results: applyCatalogPlaybackFilters(page.results),
+      nextPageToken: page.nextPageToken,
+    };
+  }
+
   const { db } = getDatabase();
   const normalizedQuery = normalizeSearchQuery(query);
   const timestamp = new Date().toISOString();
@@ -268,10 +360,25 @@ export async function searchYouTubeKaraoke(
       .get() ?? null;
 
   if (cached) {
-    return filterDeletedSearchResults(JSON.parse(cached.resultsJson) as SearchResult[]);
+    const parsed = JSON.parse(cached.resultsJson) as
+      | SearchResult[]
+      | { results: SearchResult[]; nextPageToken: string | null };
+
+    if (Array.isArray(parsed)) {
+      return {
+        results: applyCatalogPlaybackFilters(parsed),
+        nextPageToken: null,
+      };
+    }
+
+    return {
+      results: applyCatalogPlaybackFilters(parsed.results),
+      nextPageToken: parsed.nextPageToken ?? null,
+    };
   }
 
-  const results = filterDeletedSearchResults(await fetchFromYouTube(query, locale));
+  const fetched = await fetchFromYouTube(query, locale);
+  const results = applyCatalogPlaybackFilters(fetched.results);
   const expiresAt = new Date(Date.now() + SEARCH_CACHE_TTL_MS).toISOString();
 
   db.insert(searchCache)
@@ -279,19 +386,28 @@ export async function searchYouTubeKaraoke(
       id: crypto.randomUUID(),
       queryKey: normalizedQuery,
       locale,
-      resultsJson: JSON.stringify(results),
+      resultsJson: JSON.stringify({
+        results,
+        nextPageToken: fetched.nextPageToken,
+      }),
       expiresAt,
       updatedAt: timestamp,
     })
     .onConflictDoUpdate({
       target: [searchCache.queryKey, searchCache.locale],
       set: {
-        resultsJson: JSON.stringify(results),
+        resultsJson: JSON.stringify({
+          results,
+          nextPageToken: fetched.nextPageToken,
+        }),
         expiresAt,
         updatedAt: timestamp,
       },
     })
     .run();
 
-  return results;
+  return {
+    results,
+    nextPageToken: fetched.nextPageToken,
+  };
 }

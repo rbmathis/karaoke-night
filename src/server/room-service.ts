@@ -14,6 +14,11 @@ import type {
 import { generateRoomCode } from "@/lib/utils";
 import { getDatabase } from "@/server/db/client";
 import {
+  markSongEmbedBlocked,
+  recordSongPlaybackSuccess,
+  searchYouTubeKaraoke,
+} from "@/server/youtube-service";
+import {
   encoreVotes,
   favorites,
   playbackHistory,
@@ -1192,6 +1197,85 @@ export async function runRoomAction(
           })
           .run();
       }
+
+      return;
+    }
+
+    case "report-playback-error": {
+      if (action.errorCode === 100 || action.errorCode === 101 || action.errorCode === 150) {
+        markSongEmbedBlocked(action.youtubeVideoId);
+      }
+
+      return;
+    }
+
+    case "report-playback-success": {
+      recordSongPlaybackSuccess(action.youtubeVideoId);
+      return;
+    }
+
+    case "swap-current-song": {
+      const current = await getCurrentQueueItem(room);
+
+      if (!current) {
+        throw createPublicError("No song is currently playing.", 400);
+      }
+
+      const currentSong =
+        db.select()
+          .from(songs)
+          .where(eq(songs.id, current.songId))
+          .get() ?? null;
+
+      if (!currentSong) {
+        throw createPublicError("Current song not found.", 404);
+      }
+
+      markSongEmbedBlocked(currentSong.youtubeVideoId);
+
+      const searchLocale: "en" | "ja" = room.locale === "ja" ? "ja" : "en";
+      const { results: candidates } = await searchYouTubeKaraoke(
+        currentSong.title,
+        searchLocale,
+      );
+      const alternative =
+        candidates.find(
+          (candidate) =>
+            candidate.youtubeVideoId !== currentSong.youtubeVideoId && candidate.embeddable,
+        ) ??
+        candidates.find(
+          (candidate) => candidate.youtubeVideoId !== currentSong.youtubeVideoId,
+        );
+
+      if (!alternative) {
+        throw createPublicError("No other playable version was found for this song.", 404);
+      }
+
+      const replacementSong = await getOrCreateSong({
+        youtubeVideoId: alternative.youtubeVideoId,
+        title: alternative.title,
+        channelTitle: alternative.channelTitle,
+        thumbnailUrl: alternative.thumbnailUrl,
+        durationLabel: alternative.durationLabel ?? undefined,
+        languageHint: alternative.languageHint ?? undefined,
+      });
+
+      const timestamp = nowIso();
+
+      db.update(queueItems)
+        .set({
+          songId: replacementSong.id,
+          startedAt: timestamp,
+        })
+        .where(eq(queueItems.id, current.id))
+        .run();
+
+      db.update(rooms)
+        .set({
+          updatedAt: timestamp,
+        })
+        .where(eq(rooms.id, room.id))
+        .run();
 
       return;
     }

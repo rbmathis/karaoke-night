@@ -82,11 +82,24 @@ export const roomActionSchema = z.discriminatedUnion("type", [
     type: z.literal("toggle-encore-vote"),
     historyId: z.string().min(1),
   }),
+  z.object({
+    type: z.literal("report-playback-error"),
+    youtubeVideoId: z.string().trim().min(5).max(32),
+    errorCode: z.number().int(),
+  }),
+  z.object({
+    type: z.literal("report-playback-success"),
+    youtubeVideoId: z.string().trim().min(5).max(32),
+  }),
+  z.object({
+    type: z.literal("swap-current-song"),
+  }),
 ]);
 
 export const youtubeSearchSchema = z.object({
   q: z.string().trim().min(1).max(120),
   locale: localeSchema.default("en"),
+  pageToken: z.string().trim().min(1).max(64).optional(),
 });
 
 export type CreateRoomInput = z.infer<typeof createRoomSchema>;
@@ -176,4 +189,5 @@ export type RoomState = {
 export type SearchResult = SongView & {
   score: number;
   description: string;
+  embeddable: boolean;
 };
