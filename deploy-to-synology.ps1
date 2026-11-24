@@ -200,7 +200,8 @@ try {
     Write-Warning 'The previous deployment was not confirmed. Staging files alone does not mean the image was built or started.'
   }
 
-  $imageTag = "${serviceName}:sha256-$appHash"
+  $shortHash = $appHash.Substring(0, 12)
+  $imageTag = "${serviceName}:sha256-$shortHash"
   Write-Host "Image: $imageTag"
   Write-Host "Tracked build inputs to stage: $($files.Count)"
   Write-Host 'Nothing is deleted until the release is confirmed; cleanup then asks separately.'
@@ -289,6 +290,7 @@ try {
     status = 'pending'
     releaseId = $releaseId
     appHash = $appHash
+    imageTag = $imageTag
     composeSourceHash = $composeHash
     composeDeployedHash = Get-Sha256 $stagedCompose
   }
