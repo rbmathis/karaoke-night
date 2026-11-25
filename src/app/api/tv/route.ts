@@ -5,7 +5,11 @@ import { COOKIE_NAMES } from "@/lib/constants";
 import { SUPPORTED_LOCALES, type AppLocale } from "@/lib/locale";
 import { createDeviceToken } from "@/lib/utils";
 import { getOrCreateSingleRoom } from "@/server/room-service";
-import { getCookieOptions, errorResponse } from "@/server/route-utils";
+import {
+  getCookieOptions,
+  getPublicRedirectUrl,
+  errorResponse,
+} from "@/server/route-utils";
 
 export const runtime = "nodejs";
 
@@ -22,7 +26,7 @@ export async function GET(request: Request) {
     const { roomCode } = await getOrCreateSingleRoom(locale, deviceToken);
 
     const response = NextResponse.redirect(
-      new URL(`/${locale}/room/${roomCode}/tv`, request.url),
+      getPublicRedirectUrl(request, `/${locale}/room/${roomCode}/tv`),
     );
     response.cookies.set(COOKIE_NAMES.deviceToken, deviceToken, getCookieOptions(request));
     response.cookies.set(COOKIE_NAMES.locale, locale, getCookieOptions(request));

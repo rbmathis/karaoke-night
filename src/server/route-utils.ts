@@ -2,6 +2,60 @@ import { NextResponse } from "next/server";
 
 export const COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
 
+function firstHeaderValue(value: string | null) {
+  return value?.split(",")[0]?.trim() || null;
+}
+
+export function getPublicOrigin(request: Request) {
+  const forwardedProto = firstHeaderValue(request.headers.get("x-forwarded-proto"));
+  const forwardedHost = firstHeaderValue(request.headers.get("x-forwarded-host"));
+  const requestOrigin = new URL(request.url);
+  const hostHeader = firstHeaderValue(request.headers.get("host"));
+  const originHeader = firstHeaderValue(request.headers.get("origin"));
+
+  let publicHost = forwardedHost;
+
+  if (!publicHost && hostHeader && !hostHeader.startsWith("0.0.0.0")) {
+    publicHost = hostHeader;
+  }
+
+  if (!publicHost && originHeader) {
+    try {
+      const originUrl = new URL(originHeader);
+      if (!originUrl.hostname.startsWith("0.0.0.0")) {
+        publicHost = originUrl.host;
+      }
+    } catch {
+      // Ignore malformed origin headers and use the request URL fallback.
+    }
+  }
+
+  if (!publicHost && !["0.0.0.0", "::"].includes(requestOrigin.hostname)) {
+    publicHost = requestOrigin.host;
+  }
+
+  if (!publicHost) {
+    return null;
+  }
+
+  const protocol =
+    forwardedProto ||
+    (originHeader ? (() => {
+      try {
+        return new URL(originHeader).protocol;
+      } catch {
+        return requestOrigin.protocol;
+      }
+    })() : requestOrigin.protocol);
+
+  return `${protocol.replace(/:$/, "")}://${publicHost}`;
+}
+
+export function getPublicRedirectUrl(request: Request, path: string) {
+  const publicOrigin = getPublicOrigin(request);
+  return publicOrigin ? new URL(path, publicOrigin).toString() : path;
+}
+
 function shouldUseSecureCookies(request: Request) {
   const forwardedProto = request.headers.get("x-forwarded-proto");
 
