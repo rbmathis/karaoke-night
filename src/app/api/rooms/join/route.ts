@@ -21,7 +21,7 @@ export async function POST(request: Request) {
       roomCode: result.roomCode,
       redirectTo: buildLocalePath(
         payload.locale,
-        result.isHost ? `/room/${result.roomCode}/host` : `/room/${result.roomCode}`,
+        `/room/${result.roomCode}/singer`,
       ),
     });
 

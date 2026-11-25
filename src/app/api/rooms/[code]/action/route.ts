@@ -21,6 +21,11 @@ export async function POST(
     const deviceToken = cookieStore.get(COOKIE_NAMES.deviceToken)?.value;
 
     await runRoomAction(code, payload, deviceToken);
+
+    if (payload.type === "delete-room") {
+      return NextResponse.json({ deleted: true });
+    }
+
     const roomState = await getRoomState(code, deviceToken);
 
     if (!roomState) {

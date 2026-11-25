@@ -3,12 +3,9 @@
 import {
   ArrowDown,
   ArrowUp,
-  Crown,
   Heart,
   Link2,
   Mic2,
-  PanelRightClose,
-  PanelRightOpen,
   Play,
   Plus,
   QrCode,
@@ -28,7 +25,7 @@ import YouTube, { type YouTubeEvent } from "react-youtube";
 
 import { LocaleSwitcher } from "@/components/locale-switcher";
 import { useI18n } from "@/components/i18n-provider";
-import { CROWD_REACTIONS } from "@/lib/constants";
+import { CROWD_REACTIONS, SINGER_AVATARS } from "@/lib/constants";
 import type { Messages } from "@/lib/dictionaries";
 import type {
   QueueItemView,
@@ -39,9 +36,16 @@ import type {
   SongView,
 } from "@/lib/room-types";
 import type { AppLocale } from "@/lib/locale";
-import { buildLocalePath, cn, formatRelativeShort, formatTime, parseMaybeJson } from "@/lib/utils";
+import {
+  buildLocalePath,
+  cn,
+  decodeHtmlEntities,
+  formatRelativeShort,
+  formatTime,
+  parseMaybeJson,
+} from "@/lib/utils";
 
-type RoomMode = "guest" | "host" | "tv";
+type RoomMode = "singer" | "tv";
 type WorkspaceTab = "add" | "queue" | "favorites" | "room" | "history";
 type PlaybackIssue = {
   code?: number;
@@ -98,6 +102,42 @@ function SectionTitle({
   );
 }
 
+function SingerAvatar({
+  avatarId,
+  className,
+}: {
+  avatarId: string;
+  className?: string;
+}) {
+  const fallbackIndex = 0;
+  const index = Math.max(
+    0,
+    SINGER_AVATARS.findIndex((avatar) => avatar.id === avatarId),
+  );
+  const safeIndex = index < 0 ? fallbackIndex : index;
+  const column = safeIndex % 6;
+  const row = Math.floor(safeIndex / 6);
+  const backgroundPositionX = column * 20;
+  const backgroundPositionY = row * (100 / 3);
+
+  return (
+    <span
+      className={cn(
+        "block shrink-0 overflow-hidden rounded-full border border-white/15 bg-slate-900",
+        className,
+      )}
+      style={{
+        backgroundImage: "url('/images/singer-avatars-24.png')",
+        backgroundSize: "600% 400%",
+        backgroundPosition: `${backgroundPositionX}% ${backgroundPositionY}%`,
+        backgroundRepeat: "no-repeat",
+      }}
+      role="img"
+      aria-label={SINGER_AVATARS[safeIndex]?.name ?? "Singer avatar"}
+    />
+  );
+}
+
 async function readJson<T>(response: Response) {
   const payload = (await response.json().catch(() => null)) as
     | (T & { error?: string })
@@ -132,22 +172,31 @@ function ReactionOverlay({ reactions }: { reactions: ReactionView[] }) {
   const [floaters, setFloaters] = useState<
     Array<{ key: string; emoji: string; left: number; duration: number; drift: number }>
   >([]);
-  const seenIdsRef = useRef<Set<string>>(new Set());
+  const latestSeenTimestampRef = useRef<string | null>(null);
   const isFirstRunRef = useRef(true);
 
   useEffect(() => {
-    const currentIds = new Set(reactions.map((reaction) => reaction.id));
+    const newestTimestamp = reactions.reduce<string | null>(
+      (latest, reaction) =>
+        !latest || reaction.createdAt > latest ? reaction.createdAt : latest,
+      null,
+    );
 
-    // Skip the first render so existing reactions from history don't all
-    // burst on screen at once when the player first mounts.
+    // Establish the existing history watermark on mount without replaying it.
     if (isFirstRunRef.current) {
       isFirstRunRef.current = false;
-      seenIdsRef.current = currentIds;
+      latestSeenTimestampRef.current = newestTimestamp;
       return;
     }
 
-    const freshReactions = reactions.filter((reaction) => !seenIdsRef.current.has(reaction.id));
-    seenIdsRef.current = currentIds;
+    const watermark = latestSeenTimestampRef.current;
+    const freshReactions = watermark
+      ? reactions.filter((reaction) => reaction.createdAt > watermark)
+      : [];
+
+    if (newestTimestamp) {
+      latestSeenTimestampRef.current = newestTimestamp;
+    }
 
     if (freshReactions.length === 0) {
       return;
@@ -174,12 +223,12 @@ function ReactionOverlay({ reactions }: { reactions: ReactionView[] }) {
   }
 
   return (
-    <div className="pointer-events-none absolute inset-0 overflow-hidden">
+    <div className="pointer-events-none absolute inset-0 z-20 isolate overflow-hidden">
       {floaters.map((floater) => (
         <span
           key={floater.key}
           onAnimationEnd={() => removeFloater(floater.key)}
-          className="reaction-floater absolute bottom-2 text-3xl drop-shadow-lg"
+          className="reaction-floater absolute bottom-2 text-[clamp(3.5rem,8vw,6rem)] leading-none"
           style={
             {
               left: `${floater.left}%`,
@@ -248,23 +297,41 @@ function EmbeddedCurrentSongPlayer({
 
       clearWatchdog();
       watchdogRef.current = window.setTimeout(() => {
-        void player
-          .getPlayerState()
-          .then((state: number) => {
+        try {
+          const stateResult = player.getPlayerState() as unknown;
+
+          if (typeof stateResult === "number") {
             if (
               !hasStartedRef.current &&
-              state !== YOUTUBE_PLAYING &&
-              state !== YOUTUBE_BUFFERING &&
-              state !== YOUTUBE_UNSTARTED
+              stateResult !== YOUTUBE_PLAYING &&
+              stateResult !== YOUTUBE_BUFFERING &&
+              stateResult !== YOUTUBE_UNSTARTED
             ) {
-              return;
-            }
-
-            if (!hasStartedRef.current) {
               setIssue((current) => current ?? { kind: "stalled" });
             }
-          })
-          .catch(() => undefined);
+            return;
+          }
+
+          if (
+            stateResult &&
+            typeof (stateResult as Promise<number>).then === "function"
+          ) {
+            void (stateResult as Promise<number>)
+              .then((state: number) => {
+                if (
+                  !hasStartedRef.current &&
+                  state !== YOUTUBE_PLAYING &&
+                  state !== YOUTUBE_BUFFERING &&
+                  state !== YOUTUBE_UNSTARTED
+                ) {
+                  setIssue((current) => current ?? { kind: "stalled" });
+                }
+              })
+              .catch(() => undefined);
+          }
+        } catch {
+          // Some YouTube API targets expose only a synchronous state.
+        }
       }, PLAYBACK_WATCHDOG_MS);
     },
     [clearWatchdog],
@@ -335,7 +402,12 @@ function EmbeddedCurrentSongPlayer({
   );
 
   return (
-    <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-black">
+    <div
+      className={cn(
+        "relative overflow-hidden rounded-3xl border border-white/10 bg-black",
+        isTvMode ? "h-full" : "",
+      )}
+    >
       {issue?.kind === "error" ? (
         <div className="flex aspect-video flex-col items-center justify-center gap-4 px-6 py-8 text-center">
           {isTvMode ? (
@@ -394,9 +466,10 @@ function EmbeddedCurrentSongPlayer({
           <YouTube
             key={`${item.id}:${item.song.youtubeVideoId}:${playerNonce}`}
             videoId={item.song.youtubeVideoId}
-            title={item.song.title}
+            title={decodeHtmlEntities(item.song.title)}
             opts={playerOptions}
-            iframeClassName="aspect-video w-full"
+            className={isTvMode ? "h-full w-full" : undefined}
+            iframeClassName={isTvMode ? "h-full w-full" : "aspect-video w-full"}
             onReady={handleReady}
             onStateChange={handleStateChange}
             onError={handleError}
@@ -486,8 +559,15 @@ function QueueCard({
 
         <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-300">
           <span className="rounded-full bg-white/6 px-2.5 py-1">
+            <SingerAvatar avatarId={item.primarySinger.avatarId} className="mr-1 inline-block h-6 w-6" />
             <strong>{item.primarySinger.displayName}</strong>
-            {item.secondarySinger ? ` + ${item.secondarySinger.displayName}` : ""}
+            {item.secondarySinger ? (
+              <>
+                {" + "}
+                <SingerAvatar avatarId={item.secondarySinger.avatarId} className="mr-1 inline-block h-6 w-6" />
+                {item.secondarySinger.displayName}
+              </>
+            ) : null}
           </span>
           <span className="rounded-full bg-white/6 px-2.5 py-1">
             {formatTime(item.addedAt, locale)}
@@ -668,6 +748,9 @@ export function RoomClient({
   const [searchError, setSearchError] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [joinName, setJoinName] = useState("");
+  const [joinAvatar, setJoinAvatar] = useState("singer-1");
+  const [singerName, setSingerName] = useState("");
+  const [singerAvatar, setSingerAvatar] = useState("singer-1");
   const [actionPending, setActionPending] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copiedLabel, setCopiedLabel] = useState<string | null>(null);
@@ -676,18 +759,11 @@ export function RoomClient({
   );
   const [selectedSingerId, setSelectedSingerId] = useState("");
   const [selectedDuetId, setSelectedDuetId] = useState("");
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>(
-    mode === "host" ? "queue" : "add",
-  );
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("add");
   const [showShareModal, setShowShareModal] = useState(false);
-  const [showTvQueue, setShowTvQueue] = useState(true);
 
-  const guestUrl = useMemo(
-    () => (origin ? `${origin}${buildLocalePath(locale, `/room/${code}`)}` : ""),
-    [code, locale, origin],
-  );
-  const hostUrl = useMemo(
-    () => (origin ? `${origin}${buildLocalePath(locale, `/room/${code}/host`)}` : ""),
+  const singerUrl = useMemo(
+    () => (origin ? `${origin}${buildLocalePath(locale, `/room/${code}/singer`)}` : ""),
     [code, locale, origin],
   );
   const tvUrl = useMemo(
@@ -700,12 +776,16 @@ export function RoomClient({
     [roomState?.favorites],
   );
 
-  const canManageQueue = Boolean(roomState?.viewer.isHost);
   const canAddSongs = Boolean(roomState?.viewer.isJoined);
 
   const applyRoomState = useCallback((payload: RoomState) => {
     setRoomState(payload);
     setJoinName((current) => current || payload.viewer.displayName || "");
+    setSingerName((current) => current || payload.viewer.displayName || "");
+    setSingerAvatar((current) =>
+      payload.viewer.isJoined ? payload.viewer.avatarId : current,
+    );
+    setSingerAvatar((current) => payload.viewer.isJoined ? payload.viewer.avatarId : current);
     setSelectedSingerId((current) => {
       const availableIds = payload.participants.map((participant) => participant.id);
 
@@ -761,6 +841,14 @@ export function RoomClient({
           body: JSON.stringify(action),
         });
 
+        if (action.type === "delete-room") {
+          const payload = await readJson<{ deleted?: boolean }>(response);
+          if (payload.deleted) {
+            window.location.assign(buildLocalePath(locale));
+            return;
+          }
+        }
+
         const payload = await readJson<RoomState>(response);
         applyRoomState(payload);
         setActionError(null);
@@ -777,7 +865,7 @@ export function RoomClient({
         }
       }
     },
-    [applyRoomState, code, messages.errors.generic],
+    [applyRoomState, code, locale, messages.errors.generic],
   );
 
   useEffect(() => {
@@ -897,6 +985,7 @@ export function RoomClient({
         body: JSON.stringify({
           code,
           displayName: joinName,
+          avatarId: joinAvatar,
           locale,
         }),
       });
@@ -1019,7 +1108,7 @@ export function RoomClient({
   }
 
   function focusAddSong() {
-    if (mode === "guest") {
+    if (mode === "singer") {
       setActiveTab("add");
     }
 
@@ -1028,9 +1117,6 @@ export function RoomClient({
       searchInputRef.current?.focus();
     }, 50);
   }
-
-  const baseButton =
-    "rounded-full border px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-45";
 
   if (loading) {
     return (
@@ -1057,7 +1143,6 @@ export function RoomClient({
   }
 
   const currentSong = roomState.current;
-  const noCurrentSong = !currentSong;
 
   const shareModal = showShareModal ? (
     <div
@@ -1085,12 +1170,11 @@ export function RoomClient({
 
         <div className="mt-5 flex flex-col items-center gap-5 sm:flex-row sm:items-start">
           <div className="shrink-0 rounded-2xl border border-white/10 bg-white p-3">
-            <QRCodeSVG value={guestUrl || `https://example.invalid/${code}`} size={148} />
+            <QRCodeSVG value={singerUrl || `https://example.invalid/${code}`} size={148} />
           </div>
           <div className="w-full min-w-0 flex-1 space-y-2.5">
             {[
-              { label: messages.room.guestLink, value: guestUrl },
-              { label: messages.room.hostLink, value: hostUrl },
+              { label: messages.room.singerLink, value: singerUrl },
               { label: messages.room.tvLink, value: tvUrl },
             ].map((entry) => (
               <div
@@ -1126,8 +1210,8 @@ export function RoomClient({
 
   if (mode === "tv") {
     return (
-      <main className="flex min-h-screen w-full flex-col bg-slate-950 px-3 py-3 sm:px-4">
-        <header className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
+      <main className="flex h-screen w-full flex-col overflow-hidden bg-slate-950 px-2 py-1">
+        <header className="mb-1 flex shrink-0 flex-wrap items-center justify-between gap-2 px-1">
           <div className="flex items-center gap-2.5">
             <h1 className="text-base font-semibold text-white sm:text-lg">
               {roomState.room.name}
@@ -1140,18 +1224,6 @@ export function RoomClient({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => setShowTvQueue((current) => !current)}
-              className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/10"
-            >
-              {showTvQueue ? (
-                <PanelRightClose className="h-3.5 w-3.5" />
-              ) : (
-                <PanelRightOpen className="h-3.5 w-3.5" />
-              )}
-              {messages.common.upNext} ({roomState.queue.length})
-            </button>
-            <button
-              type="button"
               onClick={() => setShowShareModal(true)}
               className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/10"
             >
@@ -1159,10 +1231,10 @@ export function RoomClient({
               {messages.room.shareRoom}
             </button>
             <Link
-              href={buildLocalePath(locale, `/room/${code}/host`)}
+              href={buildLocalePath(locale, `/room/${code}/singer`)}
               className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/10"
             >
-              {messages.room.hostConsole}
+              {messages.room.singerView}
             </Link>
           </div>
         </header>
@@ -1173,25 +1245,26 @@ export function RoomClient({
           </div>
         ) : null}
 
-        <div
-          className={cn(
-            "grid flex-1 gap-4",
-            showTvQueue ? "lg:grid-cols-[1fr_320px] xl:grid-cols-[1fr_360px]" : "grid-cols-1",
-          )}
-        >
-          <div className="flex flex-col justify-center">
+        <div className="flex min-h-0 flex-1 flex-col gap-2">
+          <div className="min-h-0 flex-1">
             {currentSong ? (
-              <div className="space-y-3">
-                <div className="relative rounded-3xl p-[1px] shadow-[0_0_60px_-15px_rgba(251,146,60,0.35)]">
+              <div className="flex h-full flex-col gap-2">
+                <div className="relative min-h-0 flex-1 rounded-3xl p-[1px] shadow-[0_0_60px_-15px_rgba(251,146,60,0.35)]">
                   <EmbeddedCurrentSongPlayer
                     key={`${currentSong.id}:${currentSong.song.youtubeVideoId}`}
                     item={currentSong}
                     origin={origin}
                     messages={messages}
                     isTvMode
-                    canSkip={false}
+                    canSkip
                     actionPending={actionPending}
                     reactions={roomState.recentReactions}
+                    onSkip={() =>
+                      void performAction({
+                        type: "advance-playback",
+                        outcome: "skipped",
+                      })
+                    }
                     onSwapVersion={() =>
                       void performAction({
                         type: "swap-current-song",
@@ -1216,12 +1289,18 @@ export function RoomClient({
                         true,
                       )
                     }
+                    onPlaybackEnded={() =>
+                      void performAction({
+                        type: "advance-playback",
+                        outcome: "played",
+                      })
+                    }
                   />
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-300/20 bg-gradient-to-r from-amber-500/12 via-fuchsia-500/10 to-slate-900/80 px-4 py-3 backdrop-blur">
                   <div className="flex min-w-0 items-center gap-3">
                     <span className="now-singing-mic flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-amber-300/40 bg-amber-400/20 text-amber-200">
-                      <Mic2 className="h-5 w-5" />
+                      <SingerAvatar avatarId={currentSong.primarySinger.avatarId} className="h-9 w-9" />
                     </span>
                     <div className="min-w-0">
                       <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-300">
@@ -1235,13 +1314,29 @@ export function RoomClient({
                       </p>
                     </div>
                   </div>
-                  <p className="max-w-xl truncate text-sm font-medium text-slate-200 sm:text-base">
-                    {currentSong.song.title}
-                  </p>
+                  <div className="flex min-w-0 items-center gap-3">
+                    <p className="max-w-xl truncate text-sm font-medium text-slate-200 sm:text-base">
+                      {decodeHtmlEntities(currentSong.song.title)}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void performAction({
+                          type: "advance-playback",
+                          outcome: "skipped",
+                        })
+                      }
+                      disabled={actionPending}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-amber-300/30 bg-amber-400/15 px-3.5 py-2 text-xs font-semibold text-amber-100 transition hover:bg-amber-400/25 disabled:cursor-not-allowed disabled:opacity-45"
+                    >
+                      <SkipForward className="h-3.5 w-3.5" />
+                      {messages.common.skip}
+                    </button>
+                  </div>
                 </div>
               </div>
             ) : (
-              <div className="relative flex aspect-video flex-col items-center justify-center overflow-hidden rounded-3xl border border-amber-200/15 bg-slate-950 px-6 text-center shadow-2xl">
+              <div className="relative flex h-full flex-col items-center justify-center overflow-hidden rounded-3xl border border-amber-200/15 bg-slate-950 px-6 text-center shadow-2xl">
                 <Image
                   src="/images/tv-standby-stage.jpg"
                   alt="Family Night Karaoke Stage"
@@ -1261,48 +1356,100 @@ export function RoomClient({
                   <p className="mt-2 text-sm leading-6 text-slate-200 sm:text-base">
                     {messages.tv.standbyHint}
                   </p>
-                  <button
-                    type="button"
-                    onClick={() => setShowShareModal(true)}
-                    className="mt-5 inline-flex items-center gap-2 rounded-full border border-amber-300/35 bg-amber-400/20 px-5 py-2.5 text-sm font-semibold text-amber-100 backdrop-blur transition hover:bg-amber-400/30"
-                  >
-                    <QrCode className="h-4 w-4" />
-                    {messages.room.shareRoom}
-                  </button>
+                  <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+                    {roomState.queue.length > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => void performAction({ type: "start-playback" })}
+                        disabled={actionPending}
+                        className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-cyan-400 via-sky-400 to-fuchsia-400 px-5 py-2.5 text-sm font-semibold text-slate-950 shadow-lg transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Play className="h-4 w-4" />
+                        {messages.host.startFirstSong}
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => setShowShareModal(true)}
+                      className="inline-flex items-center gap-2 rounded-full border border-amber-300/35 bg-amber-400/20 px-5 py-2.5 text-sm font-semibold text-amber-100 backdrop-blur transition hover:bg-amber-400/30"
+                    >
+                      <QrCode className="h-4 w-4" />
+                      {messages.room.shareRoom}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
           </div>
 
-          {showTvQueue ? (
-            <aside className="flex flex-col rounded-3xl border border-white/10 bg-white/[0.03] p-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300/90">
-                  {messages.common.upNext}
-                </h2>
-                <span className="text-xs text-slate-400">{roomState.queue.length}</span>
-              </div>
-              <div className="mt-3 flex-1 space-y-2.5 overflow-y-auto">
-                {roomState.queue.length === 0 ? (
-                  <p className="text-sm text-slate-400">{messages.room.noQueue}</p>
-                ) : (
-                  roomState.queue.map((item) => (
-                    <QueueCard
-                      key={item.id}
-                      item={item}
-                      locale={locale}
-                      hostControls={false}
-                      canMoveUp={false}
-                      canMoveDown={false}
-                      onMoveUp={() => undefined}
-                      onMoveDown={() => undefined}
-                      onRemove={() => undefined}
-                    />
-                  ))
-                )}
-              </div>
+            <aside className="mt-auto flex shrink-0 flex-col rounded-3xl border border-white/10 bg-white/[0.03] p-2.5">
+              <h2 className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300/90">
+                {messages.common.upNext}
+              </h2>
+              {roomState.queue.length === 0 ? (
+                <p className="mt-4 text-sm text-slate-400">{messages.room.noQueue}</p>
+              ) : (
+                (() => {
+                  const item = roomState.queue[0];
+                  return (
+                    <div className="mt-3 flex flex-col items-stretch gap-4 rounded-3xl border border-cyan-300/15 bg-slate-950/70 p-4 sm:flex-row sm:items-center">
+                      <div className="flex min-w-48 items-center gap-3 sm:w-56 sm:border-r sm:border-white/10 sm:pr-4">
+                        <SingerAvatar
+                          avatarId={item.primarySinger.avatarId}
+                          className="h-16 w-16 shrink-0 rounded-2xl border-cyan-300/20"
+                        />
+                        <div className="min-w-0">
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-300">
+                            Singer
+                          </p>
+                          <p className="mt-1 line-clamp-2 text-xl font-semibold text-white">
+                            {item.primarySinger.displayName}
+                            {item.secondarySinger
+                              ? ` + ${item.secondarySinger.displayName}`
+                              : ""}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="relative h-24 w-full shrink-0 overflow-hidden rounded-2xl border border-white/10 bg-slate-900 sm:h-28 sm:w-48">
+                        <Image
+                          src={item.song.thumbnailUrl}
+                          alt={item.song.title}
+                          fill
+                          sizes="192px"
+                          className="object-cover"
+                        />
+                      </div>
+
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                          Next song
+                        </p>
+                        <p className="mt-1 line-clamp-2 text-lg font-semibold text-white sm:text-xl">
+                          {item.song.title}
+                        </p>
+                        <p className="mt-1 truncate text-xs text-slate-400">
+                          {item.song.channelTitle}
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void performAction({
+                            type: "remove-queue-item",
+                            queueItemId: item.id,
+                          })
+                        }
+                        className="shrink-0 rounded-full border border-rose-300/20 bg-rose-400/10 px-3 py-2 text-xs font-semibold text-rose-100 transition hover:bg-rose-400/20"
+                      >
+                        {messages.common.remove}
+                      </button>
+                    </div>
+                  );
+                })()
+              )}
             </aside>
-          ) : null}
         </div>
 
         {shareModal}
@@ -1441,20 +1588,13 @@ export function RoomClient({
   );
 
   const workspaceTabs: Array<{ id: WorkspaceTab; label: string; badge?: number; accent?: boolean }> =
-    mode === "host"
-      ? [
-          { id: "queue", label: messages.common.upNext, badge: roomState.queue.length },
-          { id: "favorites", label: messages.common.favorites, badge: roomState.favorites.length },
-          { id: "room", label: messages.common.room, badge: roomState.participants.length },
-          { id: "history", label: messages.common.history, badge: roomState.history.length },
-        ]
-      : [
-          { id: "add", label: messages.search.addSong, accent: true },
-          { id: "queue", label: messages.common.upNext, badge: roomState.queue.length },
-          { id: "favorites", label: messages.common.favorites, badge: roomState.favorites.length },
-          { id: "room", label: messages.common.room, badge: roomState.participants.length },
-          { id: "history", label: messages.common.history, badge: roomState.history.length },
-        ];
+    [
+      { id: "add", label: messages.search.addSong, accent: true },
+      { id: "queue", label: messages.common.upNext, badge: roomState.queue.length },
+      { id: "favorites", label: messages.common.favorites, badge: roomState.favorites.length },
+      { id: "room", label: messages.common.room, badge: roomState.participants.length },
+      { id: "history", label: messages.common.history, badge: roomState.history.length },
+    ];
 
   const workspaceContent = (
     <div className="space-y-4">
@@ -1494,14 +1634,14 @@ export function RoomClient({
         })}
       </div>
 
-      {activeTab === "add" && mode !== "host" ? addSongPanel : null}
+      {activeTab === "add" ? addSongPanel : null}
 
       {activeTab === "queue" ? (
         <Panel className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-base font-semibold text-white">{messages.common.upNext}</h2>
             <div className="flex items-center gap-2">
-              {roomState.viewer.isHost && roomState.queue.length > 1 ? (
+              {false && roomState!.queue.length > 1 ? (
                 <button
                   type="button"
                   onClick={() => void performAction({ type: "rebalance-queue" })}
@@ -1527,14 +1667,6 @@ export function RoomClient({
             {roomState.queue.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center">
                 <p className="text-sm text-slate-300">{messages.room.noQueue}</p>
-                <button
-                  type="button"
-                  onClick={focusAddSong}
-                  className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-cyan-400 via-sky-400 to-fuchsia-400 px-4 py-2 text-xs font-semibold text-slate-950 transition hover:brightness-110"
-                >
-                  <Plus className="h-4 w-4" />
-                  {messages.search.addSong}
-                </button>
               </div>
             ) : (
               roomState.queue.map((item, index) => (
@@ -1542,7 +1674,7 @@ export function RoomClient({
                   key={item.id}
                   item={item}
                   locale={locale}
-                  hostControls={canManageQueue}
+                  hostControls={false}
                   canMoveUp={index > 0}
                   canMoveDown={index < roomState.queue.length - 1}
                   onMoveUp={() => void moveQueueItem(item, -1)}
@@ -1595,11 +1727,6 @@ export function RoomClient({
                       <p className="truncate text-sm font-semibold text-white">
                         {participant.displayName}
                       </p>
-                      {participant.isHost ? (
-                        <span className="rounded-full border border-amber-300/20 bg-amber-400/10 px-2 py-0.5 text-[11px] font-semibold text-amber-100">
-                          {messages.common.host}
-                        </span>
-                      ) : null}
                       <span
                         className={cn(
                           "rounded-full px-2 py-0.5 text-[11px] font-semibold",
@@ -1614,40 +1741,17 @@ export function RoomClient({
                       </span>
                     </div>
                   </div>
-                  {roomState.viewer.isHost && !participant.isHost ? (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void performAction({
-                          type: "make-host",
-                          profileId: participant.id,
-                        })
-                      }
-                      className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-100 transition hover:bg-white/10"
-                    >
-                      {messages.room.makeHost}
-                    </button>
-                  ) : null}
                 </div>
               ))}
 
-              {!roomState.viewer.isHost && roomState.viewer.canClaimHost ? (
-                <button
-                  type="button"
-                  onClick={() => void performAction({ type: "claim-host" })}
-                  className="w-full rounded-2xl border border-amber-300/20 bg-amber-400/10 px-4 py-3 text-sm font-semibold text-amber-100 transition hover:bg-amber-400/15"
-                >
-                  {messages.room.claimHost}
-                </button>
-              ) : null}
             </div>
           </Panel>
 
-          {roomState.viewer.isHost ? (
+          {false ? (
             <Panel className="space-y-3">
               <h2 className="text-base font-semibold text-white">{messages.common.theme}</h2>
               <div className="flex flex-wrap gap-2">
-                {roomState.themePresets.map((theme) => (
+                {roomState!.themePresets.map((theme) => (
                   <button
                     key={theme.id}
                     type="button"
@@ -1655,12 +1759,12 @@ export function RoomClient({
                       void performAction({
                         type: "update-settings",
                         themeId:
-                          roomState.room.themeId === theme.id ? null : theme.id,
+                          roomState!.room.themeId === theme.id ? null : theme.id,
                       })
                     }
                     className={cn(
                       "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
-                      roomState.room.themeId === theme.id
+                      roomState!.room.themeId === theme.id
                         ? "border-cyan-300/25 bg-cyan-400/10 text-cyan-100"
                         : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/10",
                     )}
@@ -1672,45 +1776,6 @@ export function RoomClient({
             </Panel>
           ) : null}
 
-          <Panel className="space-y-3">
-            <h2 className="text-base font-semibold text-white">{messages.room.reactionPrompt}</h2>
-            <div className="flex flex-wrap gap-2">
-              {CROWD_REACTIONS.map((emoji) => (
-                <button
-                  key={emoji}
-                  type="button"
-                  onClick={() =>
-                    void performAction({
-                      type: "add-reaction",
-                      emoji,
-                    })
-                  }
-                  disabled={!roomState.viewer.isJoined}
-                  className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xl transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-45"
-                >
-                  {emoji}
-                </button>
-              ))}
-            </div>
-            {roomState.recentReactions.length > 0 ? (
-              <div className="space-y-2 pt-1">
-                {roomState.recentReactions.slice(0, 6).map((reaction) => (
-                  <div
-                    key={reaction.id}
-                    className="flex items-center justify-between rounded-2xl border border-white/8 bg-white/5 px-3.5 py-2 text-sm"
-                  >
-                    <span className="flex items-center gap-2.5 text-white">
-                      <span className="text-lg">{reaction.emoji}</span>
-                      {reaction.byDisplayName}
-                    </span>
-                    <span className="text-xs text-slate-400">
-                      {formatTime(reaction.createdAt, locale)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </Panel>
         </div>
       ) : null}
 
@@ -1787,12 +1852,6 @@ export function RoomClient({
           <span className="rounded-full border border-white/10 bg-white/8 px-2.5 py-0.5 text-xs font-semibold tracking-[0.2em] text-cyan-200">
             {roomState.room.code}
           </span>
-          {roomState.viewer.isHost ? (
-            <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/20 bg-amber-400/10 px-2.5 py-0.5 text-xs font-semibold text-amber-100">
-              <Crown className="h-3.5 w-3.5" />
-              {messages.common.host}
-            </span>
-          ) : null}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -1804,20 +1863,12 @@ export function RoomClient({
             <QrCode className="h-3.5 w-3.5" />
             {messages.room.shareRoom}
           </button>
-          {mode !== "guest" ? (
+          {mode !== "singer" ? (
             <Link
-              href={buildLocalePath(locale, `/room/${code}`)}
+              href={buildLocalePath(locale, `/room/${code}/singer`)}
               className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-100 transition hover:bg-white/10"
             >
-              {messages.room.guestQueue}
-            </Link>
-          ) : null}
-          {mode !== "host" ? (
-            <Link
-              href={buildLocalePath(locale, `/room/${code}/host`)}
-              className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-100 transition hover:bg-white/10"
-            >
-              {messages.room.hostConsole}
+              {messages.room.singerView}
             </Link>
           ) : null}
           <Link
@@ -1863,6 +1914,24 @@ export function RoomClient({
               className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/60"
               placeholder={messages.home.displayName}
             />
+            <div className="flex flex-wrap gap-2">
+              {SINGER_AVATARS.map((avatar) => (
+                <button
+                  key={avatar.id}
+                  type="button"
+                  onClick={() => setJoinAvatar(avatar.id)}
+                  className={cn(
+                    "overflow-hidden rounded-full border transition",
+                    joinAvatar === avatar.id
+                      ? "border-cyan-300 bg-cyan-400/20"
+                      : "border-white/10 bg-white/5 hover:bg-white/10",
+                  )}
+                  aria-label={`Choose ${avatar.name} avatar`}
+                >
+                  <SingerAvatar avatarId={avatar.id} className="h-11 w-11" />
+                </button>
+              ))}
+            </div>
             <button
               type="button"
               onClick={() => void handleJoin()}
@@ -1875,162 +1944,58 @@ export function RoomClient({
         </Panel>
       ) : null}
 
-      {mode === "host" ? (
-        <div className="space-y-6">
-          <div className="grid gap-6 xl:grid-cols-[1.25fr_0.95fr]">
-            <div className="space-y-4">
-            {currentSong ? (
-              <EmbeddedCurrentSongPlayer
-                key={`${currentSong.id}:${currentSong.song.youtubeVideoId}`}
-                item={currentSong}
-                origin={origin}
-                messages={messages}
-                isTvMode={false}
-                canSkip={roomState.viewer.isHost}
-                actionPending={actionPending}
-                reactions={roomState.recentReactions}
-                onSkip={() =>
-                  void performAction({
-                    type: "advance-playback",
-                    outcome: "skipped",
-                  })
-                }
-                onSwapVersion={() =>
-                  void performAction({
-                    type: "swap-current-song",
-                  })
-                }
-                onPlaybackError={(youtubeVideoId, errorCode) =>
-                  void performAction(
-                    {
-                      type: "report-playback-error",
-                      youtubeVideoId,
-                      errorCode,
-                    },
-                    true,
-                  )
-                }
-                onPlaybackSuccess={(youtubeVideoId) =>
-                  void performAction(
-                    {
-                      type: "report-playback-success",
-                      youtubeVideoId,
-                    },
-                    true,
-                  )
-                }
-                onPlaybackEnded={() =>
-                  roomState.viewer.isHost
-                    ? void performAction({
-                        type: "advance-playback",
-                        outcome: "played",
-                      })
-                    : undefined
-                }
+      {mode === "singer" && roomState.viewer.isJoined ? (
+        <Panel className="space-y-4">
+          <SectionTitle
+            eyebrow="My singer profile"
+            title={roomState.viewer.displayName ?? "Singer"}
+          />
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="flex-1 min-w-48 space-y-2">
+              <span className="text-sm text-slate-200">Singer name</span>
+              <input
+                value={singerName}
+                onChange={(event) => setSingerName(event.target.value)}
+                className="w-full rounded-2xl border border-white/10 bg-slate-950/70 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400/60"
               />
-            ) : (
-              <div className="flex aspect-video flex-col items-center justify-center rounded-3xl border border-dashed border-white/12 bg-black/30 px-6 text-center">
-                <Mic2 className="h-10 w-10 text-cyan-300" />
-                <p className="mt-4 text-lg font-semibold text-white">
-                  {messages.room.noCurrentSong}
-                </p>
-                <p className="mt-2 max-w-md text-sm text-slate-300">
-                  {messages.room.startPartyGesture}
-                </p>
-              </div>
-            )}
-
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3.5">
-              <div className="min-w-0">
-                <p className="truncate text-base font-semibold text-white">
-                  {currentSong ? currentSong.song.title : messages.room.noCurrentSong}
-                </p>
-                <p className="mt-0.5 text-xs text-slate-300">
-                  {currentSong
-                    ? `${currentSong.primarySinger.displayName}${currentSong.secondarySinger ? ` + ${currentSong.secondarySinger.displayName}` : ""}`
-                    : messages.room.startHint}
-                </p>
-              </div>
-
-              {roomState.viewer.isHost ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  {noCurrentSong ? (
-                    <button
-                      type="button"
-                      onClick={() => void performAction({ type: "start-playback" })}
-                      disabled={actionPending || roomState.queue.length === 0}
-                      className={`${baseButton} border-cyan-300/30 bg-cyan-400/15 text-cyan-100 hover:bg-cyan-400/25`}
-                    >
-                      <span className="inline-flex items-center gap-1.5">
-                        <Play className="h-3.5 w-3.5" />
-                        {messages.host.startFirstSong}
-                      </span>
-                    </button>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void performAction({
-                            type: "advance-playback",
-                            outcome: "played",
-                          })
-                        }
-                        disabled={actionPending}
-                        className={`${baseButton} border-emerald-300/30 bg-emerald-400/15 text-emerald-100 hover:bg-emerald-400/25`}
-                      >
-                        <span className="inline-flex items-center gap-1.5">
-                          <SkipForward className="h-3.5 w-3.5" />
-                          {messages.host.playNextSong}
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void performAction({
-                            type: "advance-playback",
-                            outcome: "skipped",
-                          })
-                        }
-                        disabled={actionPending}
-                        className={`${baseButton} border-rose-300/25 bg-rose-400/10 text-rose-100 hover:bg-rose-400/20`}
-                      >
-                        {messages.common.skip}
-                      </button>
-                    </>
-                  )}
-                </div>
-              ) : null}
-            </div>
-
-            {roomState.viewer.isJoined ? (
-              <div className="flex flex-wrap items-center gap-2">
-                {CROWD_REACTIONS.map((emoji) => (
-                  <button
-                    key={emoji}
-                    type="button"
-                    onClick={() =>
-                      void performAction({
-                        type: "add-reaction",
-                        emoji,
-                      })
-                    }
-                    className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-lg transition hover:bg-white/10"
-                  >
-                    {emoji}
-                  </button>
-                ))}
-              </div>
-            ) : null}
+            </label>
+            <button
+              type="button"
+              onClick={() =>
+                void performAction({
+                  type: "update-singer",
+                  displayName: singerName,
+                  avatarId: singerAvatar,
+                })
+              }
+              disabled={actionPending || singerName.trim().length < 2}
+              className="rounded-2xl bg-gradient-to-r from-cyan-400 via-sky-400 to-fuchsia-400 px-4 py-3 text-sm font-semibold text-slate-950 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              Save
+            </button>
           </div>
-
-          <div>{workspaceContent}</div>
+          <div className="flex flex-wrap gap-2">
+            {SINGER_AVATARS.map((avatar) => (
+              <button
+                key={avatar.id}
+                type="button"
+                onClick={() => setSingerAvatar(avatar.id)}
+                className={cn(
+                  "overflow-hidden rounded-full border transition",
+                  singerAvatar === avatar.id
+                    ? "border-cyan-300 bg-cyan-400/20 shadow-lg shadow-cyan-400/10"
+                    : "border-white/10 bg-white/5 hover:bg-white/10",
+                )}
+                aria-label={`Choose ${avatar.name} avatar`}
+              >
+                <SingerAvatar avatarId={avatar.id} className="h-12 w-12" />
+              </button>
+            ))}
           </div>
+        </Panel>
+      ) : null}
 
-          {addSongPanel}
-        </div>
-      ) : (
-        <div className="space-y-5">
+      <div className="space-y-5">
           {currentSong ? (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-slate-950/60 px-4 py-3">
               <div className="flex min-w-0 items-center gap-3">
@@ -2048,9 +2013,10 @@ export function RoomClient({
                     {messages.common.currentSong}
                   </p>
                   <p className="truncate text-sm font-semibold text-white">
-                    {currentSong.song.title}
+                    {decodeHtmlEntities(currentSong.song.title)}
                   </p>
                   <p className="text-xs text-slate-400">
+                    <SingerAvatar avatarId={currentSong.primarySinger.avatarId} className="mr-1 inline-block h-6 w-6" />
                     {currentSong.primarySinger.displayName}
                     {currentSong.secondarySinger
                       ? ` + ${currentSong.secondarySinger.displayName}`
@@ -2083,7 +2049,6 @@ export function RoomClient({
 
           {workspaceContent}
         </div>
-      )}
 
       {shareModal}
     </main>

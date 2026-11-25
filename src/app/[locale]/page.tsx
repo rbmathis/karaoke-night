@@ -1,6 +1,5 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
-import { HomePageClient } from "@/components/home-page-client";
 import { isSupportedLocale } from "@/lib/locale";
 
 export default async function LocaleHomePage({
@@ -14,5 +13,5 @@ export default async function LocaleHomePage({
     notFound();
   }
 
-  return <HomePageClient locale={locale} />;
+  redirect(`/api/tv?locale=${locale}`);
 }

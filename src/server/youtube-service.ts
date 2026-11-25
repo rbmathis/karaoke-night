@@ -4,7 +4,11 @@ import { and, eq, gt, inArray, isNotNull, or, sql } from "drizzle-orm";
 
 import { KARAOKE_CHANNEL_HINTS, SEARCH_CACHE_TTL_MS } from "@/lib/constants";
 import type { SearchResult } from "@/lib/room-types";
-import { containsJapaneseCharacters, normalizeSearchQuery } from "@/lib/utils";
+import {
+  containsJapaneseCharacters,
+  decodeHtmlEntities,
+  normalizeSearchQuery,
+} from "@/lib/utils";
 import { getDatabase } from "@/server/db/client";
 import { searchCache, songs } from "@/server/db/schema";
 
@@ -185,8 +189,10 @@ async function fetchFromYouTube(
 
       const status = byVideoId.get(videoId);
 
-      const title = item.snippet?.title?.trim();
-      const channelTitle = item.snippet?.channelTitle?.trim();
+      const title = item.snippet?.title ? decodeHtmlEntities(item.snippet.title.trim()) : "";
+      const channelTitle = item.snippet?.channelTitle
+        ? decodeHtmlEntities(item.snippet.channelTitle.trim())
+        : "";
       const thumbnailUrl =
         item.snippet?.thumbnails?.high?.url ??
         item.snippet?.thumbnails?.medium?.url ??

@@ -16,6 +16,7 @@ export const metadata: Metadata = {
   title: "karaoke-night",
   description:
     "A mobile-first karaoke party app for collaborative YouTube queues, host playback, and multilingual sing-alongs.",
+  referrer: "strict-origin-when-cross-origin",
 };
 
 export default function RootLayout({

@@ -13,5 +13,5 @@ export default async function RootPage() {
     headerStore.get("accept-language"),
   );
 
-  redirect(`/${locale}`);
+  redirect(`/api/tv?locale=${locale}`);
 }

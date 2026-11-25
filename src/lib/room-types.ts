@@ -14,6 +14,7 @@ export const createRoomSchema = z.object({
 export const joinRoomSchema = z.object({
   code: z.string().trim().min(4).max(8),
   displayName: z.string().trim().min(2).max(24),
+  avatarId: z.string().trim().min(1).max(16).optional(),
   locale: localeSchema.default("en"),
 });
 
@@ -29,6 +30,11 @@ export const songInputSchema = z.object({
 export const roomActionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("heartbeat"),
+  }),
+  z.object({
+    type: z.literal("update-singer"),
+    displayName: z.string().trim().min(2).max(24),
+    avatarId: z.string().trim().min(1).max(16),
   }),
   z.object({
     type: z.literal("claim-host"),
@@ -83,6 +89,9 @@ export const roomActionSchema = z.discriminatedUnion("type", [
     historyId: z.string().min(1),
   }),
   z.object({
+    type: z.literal("delete-room"),
+  }),
+  z.object({
     type: z.literal("report-playback-error"),
     youtubeVideoId: z.string().trim().min(5).max(32),
     errorCode: z.number().int(),
@@ -111,6 +120,7 @@ export type YouTubeSearchInput = z.infer<typeof youtubeSearchSchema>;
 export type PersonSummary = {
   id: string;
   displayName: string;
+  avatarId: string;
   isHost?: boolean;
   isPresent?: boolean;
 };
@@ -173,6 +183,7 @@ export type RoomState = {
   viewer: {
     profileId: string | null;
     displayName: string | null;
+    avatarId: string;
     isHost: boolean;
     isJoined: boolean;
     canClaimHost: boolean;

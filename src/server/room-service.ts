@@ -13,6 +13,7 @@ import type {
 } from "@/lib/room-types";
 import { generateRoomCode } from "@/lib/utils";
 import { getDatabase } from "@/server/db/client";
+import { publishRoomEvent } from "@/server/room-hub";
 import {
   markSongEmbedBlocked,
   recordSongPlaybackSuccess,
@@ -84,10 +85,12 @@ async function getProfileByDeviceToken(deviceToken?: string | null) {
 async function upsertProfile({
   deviceToken,
   displayName,
+  avatarId,
   locale,
 }: {
   deviceToken: string;
   displayName: string;
+  avatarId?: string;
   locale: "en" | "ja";
 }) {
   const { db } = getDatabase();
@@ -98,6 +101,7 @@ async function upsertProfile({
     db.update(profiles)
       .set({
         displayName,
+        avatarId: avatarId ?? existing.avatarId,
         preferredLocale: locale,
         updatedAt: timestamp,
       })
@@ -107,6 +111,7 @@ async function upsertProfile({
     return {
       ...existing,
       displayName,
+      avatarId: avatarId ?? existing.avatarId,
       preferredLocale: locale,
       updatedAt: timestamp,
     };
@@ -116,6 +121,7 @@ async function upsertProfile({
     id: crypto.randomUUID(),
     deviceToken,
     displayName,
+    avatarId: avatarId ?? "singer-1",
     preferredLocale: locale,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -435,7 +441,7 @@ export async function createRoom(
 }
 
 export async function joinRoom(
-  input: { code: string; displayName: string; locale: "en" | "ja" },
+  input: { code: string; displayName: string; avatarId?: string; locale: "en" | "ja" },
   deviceToken: string,
 ) {
   const room = await getRoomByCode(input.code);
@@ -447,6 +453,7 @@ export async function joinRoom(
   const profile = await upsertProfile({
     deviceToken,
     displayName: input.displayName,
+    avatarId: input.avatarId,
     locale: input.locale,
   });
 
@@ -456,6 +463,138 @@ export async function joinRoom(
     roomCode: room.code,
     isHost: room.hostProfileId === profile.id,
   };
+}
+
+export async function getOrCreateSingleRoom(locale: "en" | "ja", deviceToken: string) {
+  const { db } = getDatabase();
+  const existing =
+    db.select()
+      .from(rooms)
+      .orderBy(desc(rooms.updatedAt))
+      .limit(1)
+      .get() ?? null;
+
+  if (existing) {
+    const profile = await upsertProfile({
+      deviceToken,
+      displayName: "TV",
+      locale,
+    });
+
+    db.update(rooms)
+      .set({
+        hostProfileId: profile.id,
+        locale,
+        updatedAt: nowIso(),
+      })
+      .where(eq(rooms.id, existing.id))
+      .run();
+    await touchParticipant(existing.id, profile.id);
+
+    return { roomCode: existing.code };
+  }
+
+  return createRoom(
+    {
+      displayName: "TV",
+      roomName: "Karaoke Night",
+      locale,
+    },
+    deviceToken,
+  );
+}
+
+export async function deleteRoomByCode(roomCode: string, deviceToken?: string | null) {
+  const { db, sqlite } = getDatabase();
+  const room = await getRoomByCode(roomCode);
+
+  if (!room) {
+    throw createPublicError("That room was not found.", 404);
+  }
+
+  await requireHost(room, deviceToken);
+
+  const deleteRoom = sqlite.transaction(() => {
+    const historyIds = db
+      .select({ id: playbackHistory.id })
+      .from(playbackHistory)
+      .where(eq(playbackHistory.roomId, room.id))
+      .all()
+      .map((row) => row.id);
+
+    if (historyIds.length > 0) {
+      db.delete(encoreVotes).where(inArray(encoreVotes.historyId, historyIds)).run();
+    }
+
+    db.delete(reactions).where(eq(reactions.roomId, room.id)).run();
+    db.delete(playbackHistory).where(eq(playbackHistory.roomId, room.id)).run();
+    db.delete(queueItems).where(eq(queueItems.roomId, room.id)).run();
+    db.delete(roomParticipants).where(eq(roomParticipants.roomId, room.id)).run();
+    db.delete(rooms).where(eq(rooms.id, room.id)).run();
+  });
+
+  deleteRoom();
+  publishRoomEvent(room.code, "deleted");
+}
+
+export function listRooms() {
+  const { db } = getDatabase();
+
+  const roomRows = db
+    .select({
+      id: rooms.id,
+      code: rooms.code,
+      name: rooms.name,
+      updatedAt: rooms.updatedAt,
+      currentSongTitle: songs.title,
+    })
+    .from(rooms)
+    .leftJoin(queueItems, eq(rooms.activeQueueItemId, queueItems.id))
+    .leftJoin(songs, eq(queueItems.songId, songs.id))
+    .orderBy(desc(rooms.updatedAt))
+    .limit(1)
+    .all();
+
+  const participantRows = db
+    .select({
+      roomId: roomParticipants.roomId,
+      profileId: roomParticipants.profileId,
+      displayName: profiles.displayName,
+    })
+    .from(roomParticipants)
+    .innerJoin(profiles, eq(roomParticipants.profileId, profiles.id))
+    .where(eq(roomParticipants.isPresent, true))
+    .all();
+
+  const queueCounts = db
+    .select({
+      roomId: queueItems.roomId,
+      count: sql<number>`count(*)`,
+    })
+    .from(queueItems)
+    .where(eq(queueItems.status, "queued"))
+    .groupBy(queueItems.roomId)
+    .all();
+
+  const participantMap = new Map<string, typeof participantRows>();
+  for (const participant of participantRows) {
+    const existing = participantMap.get(participant.roomId) ?? [];
+    existing.push(participant);
+    participantMap.set(participant.roomId, existing);
+  }
+
+  const queueCountMap = new Map(queueCounts.map((row) => [row.roomId, Number(row.count)]));
+
+  return roomRows.map((room) => {
+    return {
+      code: room.code,
+      name: room.name,
+      updatedAt: room.updatedAt,
+      currentSongTitle: room.currentSongTitle ?? null,
+      participantCount: participantMap.get(room.id)?.length ?? 0,
+      queuedCount: queueCountMap.get(room.id) ?? 0,
+    };
+  });
 }
 
 export async function getRoomState(
@@ -482,6 +621,7 @@ export async function getRoomState(
     db.select({
       profileId: profiles.id,
       displayName: profiles.displayName,
+      avatarId: profiles.avatarId,
       preferredLocale: profiles.preferredLocale,
       lastSeenAt: roomParticipants.lastSeenAt,
       isPresent: roomParticipants.isPresent,
@@ -636,6 +776,7 @@ export async function getRoomState(
           .select({
             id: profiles.id,
             displayName: profiles.displayName,
+            avatarId: profiles.avatarId,
           })
           .from(profiles)
           .where(inArray(profiles.id, Array.from(referencedProfileIds)))
@@ -648,12 +789,16 @@ export async function getRoomState(
       {
         id: profile.id,
         displayName: profile.displayName,
+        avatarId: profile.avatarId,
       },
     ]),
   );
 
   function getDisplayName(profileId: string) {
-    return profileMap.get(profileId)?.displayName ?? "Guest";
+    return profileMap.get(profileId)?.displayName ?? "Singer";
+  }
+  function getAvatar(profileId: string) {
+    return profileMap.get(profileId)?.avatarId ?? "🎤";
   }
 
   const voteCountMap = new Map(voteCounts.map((row) => [row.historyId, row.votes]));
@@ -671,12 +816,14 @@ export async function getRoomState(
     primarySinger: {
       id: row.primarySingerProfileId,
       displayName: getDisplayName(row.primarySingerProfileId),
+      avatarId: getAvatar(row.primarySingerProfileId),
       isHost: room.hostProfileId === row.primarySingerProfileId,
     },
     secondarySinger: row.secondarySingerProfileId
       ? {
           id: row.secondarySingerProfileId,
           displayName: getDisplayName(row.secondarySingerProfileId),
+          avatarId: getAvatar(row.secondarySingerProfileId),
           isHost: room.hostProfileId === row.secondarySingerProfileId,
         }
       : null,
@@ -719,6 +866,7 @@ export async function getRoomState(
     viewer: {
       profileId: viewer.profile?.id ?? null,
       displayName: viewer.profile?.displayName ?? null,
+      avatarId: viewer.profile?.avatarId ?? "singer-1",
       isHost: viewer.profile?.id === room.hostProfileId,
       isJoined: Boolean(viewer.participant),
       canClaimHost,
@@ -726,6 +874,7 @@ export async function getRoomState(
     participants: participantRows.map((participant) => ({
       id: participant.profileId,
       displayName: participant.displayName,
+      avatarId: participant.avatarId,
       isHost: room.hostProfileId === participant.profileId,
       isPresent: Boolean(participant.isPresent),
       lastSeenAt: participant.lastSeenAt,
@@ -741,12 +890,14 @@ export async function getRoomState(
       primarySinger: {
         id: row.primarySingerProfileId,
         displayName: getDisplayName(row.primarySingerProfileId),
+        avatarId: getAvatar(row.primarySingerProfileId),
         isHost: room.hostProfileId === row.primarySingerProfileId,
       },
       secondarySinger: row.secondarySingerProfileId
         ? {
             id: row.secondarySingerProfileId,
             displayName: getDisplayName(row.secondarySingerProfileId),
+            avatarId: getAvatar(row.secondarySingerProfileId),
             isHost: room.hostProfileId === row.secondarySingerProfileId,
           }
         : null,
@@ -792,6 +943,20 @@ export async function runRoomAction(
   }
 
   switch (action.type) {
+    case "update-singer": {
+      const viewer = await ensureJoinedViewer(room.id, deviceToken);
+      const timestamp = nowIso();
+      db.update(profiles)
+        .set({
+          displayName: action.displayName,
+          avatarId: action.avatarId,
+          updatedAt: timestamp,
+        })
+        .where(eq(profiles.id, viewer.profile.id))
+        .run();
+      return;
+    }
+
     case "heartbeat": {
       const viewer = await getViewerContext(room.id, deviceToken);
 
@@ -896,21 +1061,35 @@ export async function runRoomAction(
           .where(eq(queueItems.roomId, room.id))
           .get()?.highest ?? 0;
 
+      const timestamp = nowIso();
+      const newQueueItemId = crypto.randomUUID();
+      const shouldStartImmediately = !room.activeQueueItemId;
+
       db.insert(queueItems)
         .values({
-          id: crypto.randomUUID(),
+          id: newQueueItemId,
           roomId: room.id,
           songId: song.id,
           addedByProfileId: viewer.profile.id,
           primarySingerProfileId: primarySingerId,
           secondarySingerProfileId: secondarySingerId,
           position: Number(currentMax) + 1,
-          status: "queued",
-          addedAt: nowIso(),
-          startedAt: null,
+          status: shouldStartImmediately ? "playing" : "queued",
+          addedAt: timestamp,
+          startedAt: shouldStartImmediately ? timestamp : null,
           endedAt: null,
         })
         .run();
+
+      if (shouldStartImmediately) {
+        db.update(rooms)
+          .set({
+            activeQueueItemId: newQueueItemId,
+            updatedAt: timestamp,
+          })
+          .where(eq(rooms.id, room.id))
+          .run();
+      }
       return;
     }
 
@@ -961,8 +1140,6 @@ export async function runRoomAction(
     }
 
     case "start-playback": {
-      await requireHost(room, deviceToken);
-
       const alreadyCurrent = await getCurrentQueueItem(room);
 
       if (alreadyCurrent) {
@@ -1008,8 +1185,6 @@ export async function runRoomAction(
     }
 
     case "advance-playback": {
-      await requireHost(room, deviceToken);
-
       const current = await getCurrentQueueItem(room);
 
       if (!current) {
@@ -1138,15 +1313,15 @@ export async function runRoomAction(
         })
         .run();
 
-      const staleReactions =
+      const reactionRowsForCleanup =
         db.select({
           id: reactions.id,
         })
           .from(reactions)
           .where(eq(reactions.roomId, room.id))
           .orderBy(desc(reactions.createdAt))
-          .offset(RECENT_REACTIONS_LIMIT)
           .all() ?? [];
+      const staleReactions = reactionRowsForCleanup.slice(RECENT_REACTIONS_LIMIT);
 
       if (staleReactions.length > 0) {
         db.delete(reactions)
@@ -1198,6 +1373,11 @@ export async function runRoomAction(
           .run();
       }
 
+      return;
+    }
+
+    case "delete-room": {
+      await deleteRoomByCode(roomCode, deviceToken);
       return;
     }
 

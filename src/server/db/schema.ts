@@ -4,6 +4,7 @@ export const profiles = sqliteTable("profiles", {
   id: text("id").primaryKey(),
   deviceToken: text("device_token").notNull().unique(),
   displayName: text("display_name").notNull(),
+  avatarId: text("avatar_id").notNull().default("singer-1"),
   preferredLocale: text("preferred_locale").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),

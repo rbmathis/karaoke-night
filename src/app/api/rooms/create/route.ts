@@ -19,7 +19,7 @@ export async function POST(request: Request) {
 
     const response = NextResponse.json({
       roomCode: result.roomCode,
-      redirectTo: buildLocalePath(payload.locale, `/room/${result.roomCode}/host`),
+      redirectTo: buildLocalePath(payload.locale, `/room/${result.roomCode}/tv`),
     });
 
     response.cookies.set(COOKIE_NAMES.deviceToken, deviceToken, getCookieOptions(request));

@@ -1,9 +1,9 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
-import { RoomClient } from "@/components/room-client";
 import { isSupportedLocale } from "@/lib/locale";
+import { buildLocalePath } from "@/lib/utils";
 
-export default async function GuestRoomPage({
+export default async function RoomPage({
   params,
 }: {
   params: Promise<{ locale: string; code: string }>;
@@ -14,5 +14,5 @@ export default async function GuestRoomPage({
     notFound();
   }
 
-  return <RoomClient locale={locale} code={code.toUpperCase()} mode="guest" />;
+  redirect(buildLocalePath(locale, `/room/${code.toUpperCase()}/singer`));
 }

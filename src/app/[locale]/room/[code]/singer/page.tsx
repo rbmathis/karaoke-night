@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { RoomClient } from "@/components/room-client";
 import { isSupportedLocale } from "@/lib/locale";
 
-export default async function HostRoomPage({
+export default async function SingerRoomPage({
   params,
 }: {
   params: Promise<{ locale: string; code: string }>;
@@ -14,5 +14,5 @@ export default async function HostRoomPage({
     notFound();
   }
 
-  return <RoomClient locale={locale} code={code.toUpperCase()} mode="host" />;
+  return <RoomClient locale={locale} code={code.toUpperCase()} mode="singer" />;
 }

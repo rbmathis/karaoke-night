@@ -73,3 +73,19 @@ export function parseMaybeJson<T>(value: string | null | undefined, fallback: T)
     return fallback;
   }
 }
+
+const NAMED_HTML_ENTITIES: Record<string, string> = {
+  "&amp;": "&",
+  "&lt;": "<",
+  "&gt;": ">",
+  "&quot;": '"',
+  "&apos;": "'",
+  "&#39;": "'",
+};
+
+export function decodeHtmlEntities(value: string) {
+  return value
+    .replace(/&(?:amp|lt|gt|quot|apos|#39);/g, (match) => NAMED_HTML_ENTITIES[match] ?? match)
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)));
+}

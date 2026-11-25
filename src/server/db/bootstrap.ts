@@ -14,6 +14,7 @@ export function ensureSchema(sqlite: Database.Database) {
       id TEXT PRIMARY KEY,
       device_token TEXT NOT NULL UNIQUE,
       display_name TEXT NOT NULL,
+      avatar_id TEXT NOT NULL DEFAULT 'singer-1',
       preferred_locale TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -141,6 +142,10 @@ export function ensureSchema(sqlite: Database.Database) {
     CREATE UNIQUE INDEX IF NOT EXISTS search_cache_query_locale_idx
       ON search_cache (query_key, locale);
   `);
+
+  if (!hasColumn(sqlite, "profiles", "avatar_id")) {
+    sqlite.exec("ALTER TABLE profiles ADD COLUMN avatar_id TEXT NOT NULL DEFAULT 'singer-1'");
+  }
 
   if (!hasColumn(sqlite, "songs", "deleted_at")) {
     sqlite.exec("ALTER TABLE songs ADD COLUMN deleted_at TEXT");
